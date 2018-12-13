@@ -15,12 +15,15 @@ import sys
 try:
     if sys.version_info.major > 3:
         import importlib
+
         importlib.util.find_spec("casadi")
     else:
         import imp
+
         imp.find_module('casadi')
     from kipet.library.CasadiModel import CasadiModel
     from kipet.library.CasadiModel import KipetCasadiStruct
+
     found_casadi = True
 except ImportError:
     found_casadi = False
@@ -33,23 +36,23 @@ class TemplateBuilder(object):
 
     Attributes:
         _component_names (set): container with names of components.
-        
+
         _parameters (dict): map of parameter names to corresponding values
-        
+
         _parameters_bounds (dict): map of parameter names to bounds tuple
-        
+
         _init_conditions (dict): map of component/state name to its initial condition
-        
+
         _spectal_data (DataFrame, optional): DataFrame with time indices and wavelength columns
-        
+
         _absorption_data (DataFrame, optional): DataFrame with wavelength indices and component names columns
-        
+
         _odes (Function): function specified by user to return dictionary with ODE expressions
-        
+
         _meas_times (set, optional): container of measurement times
-        
+
         _feed_times (set, optional): container of feed times
-        
+
         _complementary_states (set,optional): container with additional states
 
     """
@@ -60,14 +63,15 @@ class TemplateBuilder(object):
         Args:
             **kwargs: Arbitrary keyword arguments.
             concentrations (dictionary): map of component name to initial condition
-            
+
             parameters (dictionary): map of parameter name to its corresponding value
-            
+
             extra_states (dictionary): map of state name to initial condition
 
         """
         self._component_names = set()
         self._parameters = dict()
+        self._parameters_init = dict() #added for parameter initial guess CS
         self._parameters_bounds = dict()
         self._init_conditions = dict()
         self._spectral_data = None
@@ -78,11 +82,15 @@ class TemplateBuilder(object):
         self._complementary_states = set()
         self._algebraics = set()
         self._algebraic_constraints = None
+        self._known_absorbance = None
+        self._is_known_abs_set = False
+        self._known_absorbance_data = None
         self._non_absorbing = None
         self._is_non_abs_set = False
         self._feed_times = set() #For inclusion of discrete feeds CS
         self._is_D_deriv = False
         self._is_C_deriv = False
+        
 
         components = kwargs.pop('concentrations', dict())
         if isinstance(components, dict):
@@ -135,6 +143,7 @@ class TemplateBuilder(object):
 
         """
         bounds = kwds.pop('bounds', None)
+        init = kwds.pop('init', None)
 
         if len(args) == 1:
             name = args[0]
@@ -142,6 +151,8 @@ class TemplateBuilder(object):
                 self._parameters[name] = None
                 if bounds is not None:
                     self._parameters_bounds[name] = bounds
+                if init is not None:
+                    self._parameters_init[name] = init
             elif isinstance(name, list) or isinstance(name, set):
                 if bounds is not None:
                     if len(bounds) != len(name):
@@ -150,6 +161,8 @@ class TemplateBuilder(object):
                     self._parameters[n] = None
                     if bounds is not None:
                         self._parameters_bounds[n] = bounds[i]
+                    if init is not None:
+                        self._parameters_init[n] = init[i]
             elif isinstance(name, dict):
                 if bounds is not None:
                     if len(bounds) != len(name):
@@ -158,6 +171,8 @@ class TemplateBuilder(object):
                     self._parameters[k] = v
                     if bounds is not None:
                         self._parameters_bounds[k] = bounds[k]
+                    if init is not None:
+                        self._parameters_init[k] = init[k]
             else:
                 raise RuntimeError('Kinetic parameter data not supported. Try str')
         elif len(args) == 2:
@@ -167,6 +182,8 @@ class TemplateBuilder(object):
                 self._parameters[first] = second
                 if bounds is not None:
                     self._parameters_bounds[first] = bounds
+                if init is not None:
+                    self._parameter_init[first] = init
             else:
                 raise RuntimeError('Parameter argument not supported. Try str,val')
         else:
@@ -592,14 +609,18 @@ class TemplateBuilder(object):
 
         p_dict = dict()
         for p,v in self._parameters.items():
-            
             if v is not None:
                 p_dict[p] = v
+
+            #added for option of providing initial guesses CS:
+            elif p in self._parameters_init.keys():
+                for p, l in self._parameters_init.items():
+                    p_dict[p] = l
             else:
                 for p, s in self._parameters_bounds.items():
                     lb = s[0]
                     ub = s[1]
-                    p_dict[p]=(ub-lb)/2
+                    p_dict[p] = (ub - lb) / 2
 
         pyomo_model.P = Var(pyomo_model.parameter_names,
                             # bounds = (0.0,None),
@@ -745,6 +766,10 @@ class TemplateBuilder(object):
                                                       rule=rule_algebraics)
         if self._is_non_abs_set:  #: in case of a second call after non_absorbing has been declared
             self.set_non_absorbing_species(pyomo_model, self._non_absorbing, check=False)
+            
+        if self._is_known_abs_set:  #: in case of a second call after known_absorbing has been declared
+            self.set_known_absorbing_species(pyomo_model, self._known_absorbance, self._known_absorbance_data, check=False)
+            
         return pyomo_model
 
     def create_casadi_model(self, start_time, end_time):
@@ -942,3 +967,35 @@ class TemplateBuilder(object):
             for component in self._non_absorbing:
                 new_con.add(C[time, component] == Z[time, component])
 
+    def set_known_absorbing_species(self, model, known_abs_list, absorbance_data, check=True):
+        # type: (ConcreteModel, list, dataframe, bool) -> None
+        """Sets the known absorbance profiles for specific components of the model.
+
+        Args:
+            knon_abs_list: List of known species absorbance components.
+            model: The corresponding model.
+            absorbance_data: the dataframe containing the known component spectra
+            check: Safeguard against setting this up twice.
+        """
+        if hasattr(model, 'known_absorbance'):
+            print("species with known absorbance were already set up before.")
+            return
+
+        if (self._is_non_abs_set and check):
+            raise RuntimeError('Species with known absorbance were already set up before.')
+
+        self._is_known_abs_set = True
+        self._known_absorbance = known_abs_list
+        self._known_absorbance_data = absorbance_data
+        model.add_component('known_absorbance', Set(initialize=self._known_absorbance))
+        S = getattr(model, 'S')
+        C = getattr(model, 'C')
+        Z = getattr(model, 'Z')
+        times = getattr(model, 'meas_times')
+        lambdas = getattr(model, 'meas_lambdas')
+        model.known_absorbance_data = self._known_absorbance_data
+        for component in self._known_absorbance:
+            for l in lambdas:
+                S[l, component].set_value(self._known_absorbance_data[component][l])
+                S[l, component].fix()
+        print("we got here again")

@@ -9,19 +9,18 @@
 # Estimation with unknow variancesof spectral data using pyomo discretization 
 #
 #		\frac{dZ_a}{dt} = -k_1*Z_a	                Z_a(0) = 1
-#		\frac{dZ_b}{dt} = k_1*Z_a - k_2*Z_b		Z_b(0) = 0
-#               \frac{dZ_c}{dt} = k_2*Z_b	                Z_c(0) = 0
-#               C_k(t_i) = Z_k(t_i) + w(t_i)    for all t_i in measurement points
-#               D_{i,j} = \sum_{k=0}^{Nc}C_k(t_i)S(l_j) + \xi_{i,j} for all t_i, for all l_j 
+#		\frac{dZ_b}{dt} = k_1*Z_a - k_2*Z_b		    Z_b(0) = 0
+#       \frac{dZ_c}{dt} = k_2*Z_b	                    Z_c(0) = 0
+#        C_k(t_i) = Z_k(t_i) + w(t_i)    for all t_i in measurement points
+#       D_{i,j} = \sum_{k=0}^{Nc}C_k(t_i)S(l_j) + \xi_{i,j} for all t_i, for all l_j 
 #       Initial concentration 
 
 from __future__ import print_function
+import matplotlib.pyplot as plt
 from kipet.library.TemplateBuilder import *
-from kipet.library.PyomoSimulator import *
 from kipet.library.ParameterEstimator import *
 from kipet.library.VarianceEstimator import *
 from kipet.library.data_tools import *
-import matplotlib.pyplot as plt
 import os
 import sys
 import inspect
@@ -52,10 +51,9 @@ if __name__ == "__main__":
     # of the data using .add_spectral_data
     #################################################################################    
     builder = TemplateBuilder()    
-    components = {'A':1e-3,'B':0,'C':0}
+    components = {'A':1e-3,'B':0,'C':0,'D':5e-4}
     builder.add_mixture_component(components)
-    builder.add_parameter('k1', init=4.0, bounds=(0.0,5.0)) 
-    #There is also the option of providing initial values: Just add init=... as additional argument as above.
+    builder.add_parameter('k1',bounds=(0.0,5.0))
     builder.add_parameter('k2',bounds=(0.0,1.0))
     builder.add_spectral_data(D_frame)
 
@@ -65,6 +63,7 @@ if __name__ == "__main__":
         exprs['A'] = -m.P['k1']*m.Z[t,'A']
         exprs['B'] = m.P['k1']*m.Z[t,'A']-m.P['k2']*m.Z[t,'B']
         exprs['C'] = m.P['k2']*m.Z[t,'B']
+        exprs['D'] = 0
         return exprs
     
     builder.set_odes_rule(rule_odes)
@@ -90,7 +89,7 @@ if __name__ == "__main__":
     # The set A_set is then decided. This set, explained in Section 4.3.3 is used to make the
     # variance estimation run faster and has been shown to not decrease the accuracy of the variance 
     # prediction for large noisey data sets.
-    A_set = [l for i,l in enumerate(opt_model.meas_lambdas) if (i % 4 == 0)]
+    A_set = [l for i,l in enumerate(opt_model.meas_lambdas) if (i % 7 == 0)]
     
     # Finally we run the variance estimatator using the arguments shown in Seciton 4.3.3
     results_variances = v_estimator.run_opt('ipopt',
@@ -124,22 +123,19 @@ if __name__ == "__main__":
     p_estimator.initialize_from_trajectory('Z',results_variances.Z)
     p_estimator.initialize_from_trajectory('S',results_variances.S)
     p_estimator.initialize_from_trajectory('C',results_variances.C)
-
-    # Scaling for Ipopt can also be provided from the variance estimator's solution
-    # these details are elaborated on in the manual
-    p_estimator.scale_variables_from_trajectory('Z',results_variances.Z)
-    p_estimator.scale_variables_from_trajectory('S',results_variances.S)
-    p_estimator.scale_variables_from_trajectory('C',results_variances.C)
     
-    # Again we provide options for the solver, this time providing the scaling that we set above
+    # Again we provide options for the solver
     options = dict()
-    options['nlp_scaling_method'] = 'user-scaling'
 
+    options['mu_init'] = 1e-6
+    options['bound_push'] =1e-6
     # finally we run the optimization
-    results_pyomo = p_estimator.run_opt('ipopt',
-                                      tee=True,
-                                      solver_opts = options,
-                                      variances=sigmas)
+    results_pyomo = p_estimator.run_opt('ipopt_sens',
+                                        tee=True,
+                                        solver_opts = options,
+                                        variances=sigmas,
+                                        with_d_vars=True,
+                                        covariance=True)
 
     # And display the results
     print("The estimated parameters are:")
@@ -159,5 +155,5 @@ if __name__ == "__main__":
         plt.title("Absorbance  Profile")
     
         plt.show()
-    
+
 
